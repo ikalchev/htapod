@@ -8,6 +8,9 @@ and from it, without requiring root permissions.
 This project was inspired by [httptap](https://github.com/monasticacademy/httptap).
 It has a slighly different approach, so it might be interesting to check it out!
 
+_NOTE_: On some distributions you might need to tweak app armour to allow
+unpriviliged users to create user namespaces with `sysctl kernel.apparmor_restrict_unprivileged_userns=0`.
+
 ## Example
 
 As a CLI:
