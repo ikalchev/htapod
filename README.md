@@ -8,6 +8,9 @@ and from it, without requiring root permissions.
 This project was inspired by [httptap](https://github.com/monasticacademy/httptap).
 It has a slighly different approach, so it might be interesting to check it out!
 
+**This project is currently work in progress.** There are a lot of rough edges
+and you might need to extend the out-of-the-box filters for your use case.
+
 _NOTE_: On some distributions you might need to tweak app armour to allow
 unpriviliged users to create user namespaces with `sysctl kernel.apparmor_restrict_unprivileged_userns=0`.
 
@@ -53,8 +56,12 @@ fn main() {
 }
 ```
 
-Note that depending on what you use, there could be bugs of missing features. This project
-was mainly a learning exercise, but all contributions are welcome.
+## Why?
+
+As a learning exercise, mostly. There is no end goal, but I would like to add
+these soon:
+- Properly infer request/response sizes.
+- Option to "grep" for certain patterns in the traffic.
 
 ## How does it work?
 
