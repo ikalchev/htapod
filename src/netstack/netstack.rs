@@ -12,18 +12,65 @@ use rustls_platform_verifier::ConfigVerifierExt;
 use tokio::{select, sync::mpsc::UnboundedSender};
 use tun::AsyncDevice;
 
+/// A TCP filter allows you to observe the TCP traffic going into and out of the
+/// virtual tunnel interface.
+///
+/// Both `on_source_read` and `on_destination_read` are called before data is
+/// sent between peers asynchronously. This means that these methods should
+/// not take a lot of time to complete as they will block the event loop.
+///
+/// Here is a simple example that prints the amount of data going in and out
+/// of the tunnel interface:
+///
+/// ```rust
+/// use htapod::TCPFilter;
+///
+/// struct ByteCountTCPFilter {}
+///
+/// impl TCPFilter for ByteCountTCPFilter {
+///
+///     fn on_source_read(&mut self, data: &[u8]) {
+///         log::info!("Read {} bytes from net namespace.", data.len());
+///     }
+///
+///     fn on_destination_read(&mut self, _data: &[u8]) {
+///         log::info!("Received {} bytes from the outside world.", data.len());
+///     }
+/// }
+/// ```
 pub trait TCPFilter: Send // TODO move the send bound in the netstack
 {
+    /// Called when data is sent into the tunnel interface from within the network namespace.
+    ///
+    /// This typically is data that the wrapped binary is sending to the outside world.
     fn on_source_read(&mut self, data: &[u8]);
+
+    /// Called when data is sent to the tunnel interface from the outside world.
+    ///
+    /// This typically is data that the outside world is sending into the wrapped binary
+    /// running inside the network namespace.
     fn on_destination_read(&mut self, data: &[u8]);
 }
 
+/// A representation of a UDP packet.
 pub struct UDPPacket {
+    /// The payload of the packet.
     pub data: Vec<u8>,
+
+    /// The address from which the data is sent.
     pub local_address: SocketAddr,
+
+    /// The address to which the data is sent.
     pub remote_address: SocketAddr,
 }
 
+/// A UDP filter allows you to act on the UDP traffic going into and out of the
+/// virtual tunnel interface.
+///
+///
+/// Both `handle_tun_udp` and `handle_remote_udp` are called before data is
+/// sent to the peer asynchronously. This means that these methods should
+/// not take a lot of time to complete as they will block the event loop.
 pub trait UDPFilter: Send {
     fn handle_tun_udp(
         &mut self,
@@ -42,7 +89,9 @@ pub trait UDPFilter: Send {
     ) -> std::io::Result<()>;
 }
 
-pub struct StopNetstack {
+/// A handle on the userspace network stack that allows gracefully tearing it down.
+#[doc(hidden)]
+pub(crate) struct StopNetstack {
     token: tokio_util::sync::CancellationToken,
     joined_futures: futures_util::future::JoinAll<tokio::task::JoinHandle<()>>,
 }
@@ -58,13 +107,19 @@ impl StopNetstack {
     }
 }
 
+/// A `TCPStack` defines how TCP traffic is handled through the userspace network
+/// stack.
+#[doc(hidden)]
 pub(crate) struct TCPStack<TH: TCPFilter + 'static, TR: TCPRouter + 'static> {
     handler: Arc<Mutex<TH>>,
     router: TR,
+    /// Whether to verify the TLS certificates of remote peers.
     verify_remote_tls_cert: bool,
 }
 
 impl<TH: TCPFilter, TR: TCPRouter> TCPStack<TH, TR> {
+    /// Create a new TCP network stack.
+    #[doc(hidden)]
     pub fn new(handler: TH, router: TR, verify_remote_tls_cert: bool) -> TCPStack<TH, TR> {
         TCPStack {
             handler: Arc::new(Mutex::new(handler)),
@@ -73,6 +128,21 @@ impl<TH: TCPFilter, TR: TCPRouter> TCPStack<TH, TR> {
         }
     }
 
+    /// Creates a new plain (unsecured) TCP connection.
+    ///
+    /// This method connects to the given remote address and then forwards data
+    /// between the userspace TCP stream and the remote peer. This essentially provides
+    /// the bridge between the outside world and the virtual tunnel interface inside
+    /// the network namespace.
+    ///
+    /// - `tcp_stream` - A TCP stream between a peer on the tunnel interface and htapod.
+    /// - `local_address` - The TCP address _inside the network namespace_ that initiated
+    ///     the connection to the tunnel interface.
+    /// - `remote_address` - The TCP address of the peer in the outside world to which a
+    ///     connection needs to be established.
+    /// - `tcp_filter` - The TCP filter that should be applied when proxying data between
+    ///     the `tcp_stream` and the remote peer.
+    #[doc(hidden)]
     async fn new_unsecured_tcp_connection(
         tcp_stream: netstack_smoltcp::TcpStream,
         local_address: SocketAddr,
@@ -118,6 +188,27 @@ impl<TH: TCPFilter, TR: TCPRouter> TCPStack<TH, TR> {
         };
     }
 
+    /// Creates a new TLS connection.
+    ///
+    /// This method connects to the given remote address and then forwards data
+    /// between the userspace TCP stream and the remote peer. This essentially provides
+    /// the bridge between the outside world and the virtual tunnel interface inside
+    /// the network namespace.
+    ///
+    /// - `tcp_stream` - A TCP stream between a peer on the tunnel interface and htapod.
+    /// - `local_address` - The TCP address _inside the network namespace_ that initiated
+    ///     the connection to the tunnel interface.
+    /// - `remote_address` - The TCP address of the peer in the outside world to which a
+    ///     connection needs to be established.
+    /// - `tcp_filter` - The TCP filter that should be applied when proxying data between
+    ///     the `tcp_stream` and the remote peer.
+    /// - `root_ca` - The root certificate with which to create and sign an on-demand
+    ///     certificate for the remote peer. The `root_ca` should be the certificate
+    ///     installed by htapod in the binary environment as part of the trusted
+    ///     CAs.
+    /// - `verify_remote_tls_cert` - Whether to verify the certificate of the remote
+    ///   peer.
+    #[doc(hidden)]
     async fn new_tls_connection(
         tcp_stream: netstack_smoltcp::TcpStream,
         _local_address: SocketAddr,
@@ -154,7 +245,7 @@ impl<TH: TCPFilter, TR: TCPRouter> TCPStack<TH, TR> {
                 // Accept the connection from the tunnel end.
                 let tls_stream = start.into_stream(config).await.unwrap(); // TODO
 
-                // Now, initiate a connection to the targer address.
+                // Now, initiate a connection to the target address.
                 // TODO: need to support certificate validation options here.
                 let config = {
                     if verify_remote_tls_cert {
@@ -177,7 +268,7 @@ impl<TH: TCPFilter, TR: TCPRouter> TCPStack<TH, TR> {
                 let remote_address = match server_name {
                     SanType::DnsName(name) => name.as_str().to_owned(),
                     SanType::IpAddress(address) => address.to_string(),
-                    _ => panic!("fira"), // TODO
+                    _ => panic!("Unsupported TLS peer SAN type."), // TODO
                 };
                 let remote_address = ServerName::try_from(remote_address).unwrap();
                 let remote_stream = connector.connect(remote_address, stream).await.unwrap(); // TODO
@@ -214,6 +305,24 @@ impl<TH: TCPFilter, TR: TCPRouter> TCPStack<TH, TR> {
         }
     }
 
+    /// Listens and accepts for new TCP connections.
+    ///
+    /// This method continuously waits for incoming TCP connections from the virtual
+    /// tunnel interface. When a new connection arrives and is accepted, the remote
+    /// address, i.e. the address of the peer in the outside world, is resolved using
+    /// the `self.router`. Based on that result, the connection is forwarded to the
+    /// outside world either as a plain TCP connection or as a TLS connection.
+    ///
+    /// This method stops listening for incoming connections when the `cancel_token` is
+    /// set.
+    ///
+    /// - `tcp_listener` - A TCP listener which accepts connections from the virtual
+    ///     tunnel interface.
+    /// - `cancel_token` - A token which when set will cause this method to stop
+    ///     listening for new connections and exit.
+    /// - `root_ca` - The root TLS certificate used to generate on-demand certificates
+    ///     for TLS connections.
+    #[doc(hidden)]
     async fn handle_tcp_connections(
         self,
         mut tcp_listener: netstack_smoltcp::TcpListener,
@@ -223,6 +332,7 @@ impl<TH: TCPFilter, TR: TCPRouter> TCPStack<TH, TR> {
         let root_ca = Arc::new(root_ca);
         loop {
             select! {
+                // TODO: Should spawn a task for every new connection.
                 Some((tcp_stream, local_address, remote_address)) = tcp_listener.next() => {
                     log::debug!("Got new TCP connection to {:?}", remote_address);
                     match self.router.resolve(&remote_address) {
@@ -258,6 +368,8 @@ impl<TH: TCPFilter, TR: TCPRouter> TCPStack<TH, TR> {
     }
 }
 
+/// A `UDPStack` defines how UDP packets is handled through the userspace network
+/// stack.
 pub(crate) struct UDPStack<UH: UDPFilter> {
     handler: UH,
 }
