@@ -65,7 +65,7 @@ these soon:
 
 ## How does it work?
 
-<img width="2318" height="1776" alt="htapod-2025-05-06-2057" src="https://github.com/user-attachments/assets/b87eb313-9ea0-417f-96d5-d92d167ed2e2" />
+<img width="3158" height="2230" alt="htapod-2025-05-06-2057-2" src="https://github.com/user-attachments/assets/b9f8a55d-fb14-434b-9acb-8cf1c682c03b" />
 
 ### Networking
 
