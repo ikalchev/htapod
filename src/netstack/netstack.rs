@@ -621,35 +621,25 @@ where
         }));
 
     // Extracts TCP connections from stack and sends them to the dispatcher.
-    match tcp_stack {
-        Some(tcp_stack) => {
-            let tcp_listener = tcp_listener.unwrap();
-            let handle_tun_tcp_connections_token = token.child_token();
-            futs.push(tokio::spawn({
-                async move {
-                    tcp_stack
-                        .handle_tcp_connections(
-                            tcp_listener,
-                            handle_tun_tcp_connections_token,
-                            root_ca,
-                        )
-                        .await
-                }
-            }));
-        }
-        None => (),
+    if let Some(tcp_stack) = tcp_stack {
+        let tcp_listener = tcp_listener.unwrap();
+        let handle_tun_tcp_connections_token = token.child_token();
+        futs.push(tokio::spawn({
+            async move {
+                tcp_stack
+                    .handle_tcp_connections(tcp_listener, handle_tun_tcp_connections_token, root_ca)
+                    .await
+            }
+        }));
     }
 
     // Extracts UDP packets.
-    match udp_stack {
-        Some(udp_stack) => {
-            let udp_socket = udp_socket.unwrap();
-            let handle_tun_udp_token = token.child_token();
-            futs.push(tokio::spawn(async move {
-                udp_stack.handle_udp(udp_socket, handle_tun_udp_token).await
-            }))
-        }
-        None => (),
+    if let Some(udp_stack) = udp_stack {
+        let udp_socket = udp_socket.unwrap();
+        let handle_tun_udp_token = token.child_token();
+        futs.push(tokio::spawn(async move {
+            udp_stack.handle_udp(udp_socket, handle_tun_udp_token).await
+        }))
     }
 
     StopNetstack {

@@ -119,6 +119,17 @@ where
     }
 }
 
+impl<TCPFilter, TCPRouter, UDPFilter> Default for Builder<TCPFilter, TCPRouter, UDPFilter>
+where
+    TCPFilter: crate::TCPFilter + Send + 'static,
+    TCPRouter: crate::TCPRouter + Send + 'static,
+    UDPFilter: crate::UDPFilter + Send + 'static,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn builder() -> Builder<PassthroughTCP, ByPortTCPRouter, PassthroughUDP> {
     Builder::new()
 }
@@ -283,6 +294,19 @@ where
         Ok(())
     }
 
+    /// Starts the given binary.
+    ///
+    /// This method is the entrypoint. It does the following:
+    /// 1. Create a socketpair.
+    /// 2. Call the `fork()` system call.
+    /// 3. The parent process will wait for the child process to complete initialisation
+    ///    and will then start routing traffic to the outside world.
+    /// 4. The child process will configure the namespace environment, then signal the
+    ///    parent process it is ready and will finally start the given binary.
+    ///
+    /// # Safety
+    ///
+    /// This method uses the `fork` syscall which is inherently unsafe.
     pub unsafe fn run<I, S>(self, bin: &str, args: I)
     where
         I: IntoIterator<Item = S>,

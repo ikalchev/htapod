@@ -61,17 +61,17 @@ impl ByPortTCPRouterBuilder {
 
 impl TCPRouter for ByPortTCPRouter {
     fn resolve(&self, address: &SocketAddr) -> Option<TCPTargetAddress> {
-        let address = address.clone();
+        let address = *address;
         self.port_to_proto
             .get(&address.port())
-            .and_then(|is_tls| {
+            .map(|is_tls| {
                 if *is_tls {
-                    Some(TCPTargetAddress::TLS(address))
+                    TCPTargetAddress::TLS(address)
                 } else {
-                    Some(TCPTargetAddress::Plain(address))
+                    TCPTargetAddress::Plain(address)
                 }
             })
-            .or_else(|| match &self.default_routing {
+            .or(match &self.default_routing {
                 ByPortDefaultRouting::Deny => None,
                 ByPortDefaultRouting::ForwardUnsecured => Some(TCPTargetAddress::Plain(address)),
                 ByPortDefaultRouting::ForwardWithTLS => Some(TCPTargetAddress::TLS(address)),
@@ -99,7 +99,7 @@ impl<R: TCPRouter> TCPRouter for MatchAddress<R> {
     fn resolve(&self, address: &SocketAddr) -> Option<TCPTargetAddress> {
         if self.address == address.ip() {
             self.fallback_router
-                .resolve(&SocketAddr::new(self.target.clone(), address.port()))
+                .resolve(&SocketAddr::new(self.target, address.port()))
         } else {
             self.fallback_router.resolve(address)
         }

@@ -47,13 +47,13 @@ impl TUNInterfaceConfig {
 ///
 /// By default `htapod` unshares the following namespaces:
 /// - user namespace - This allows unprivileged processes to create network interfaces,
-///     modify the routing table and mount filesystems.
+///   modify the routing table and mount filesystems.
 /// - network namespace - This allows the network interfaces that are present on the host
-///     to be invisible to processes running in the new namespace. It also creates a new
-///     routing table in the namespace.
+///   to be invisible to processes running in the new namespace. It also creates a new
+///   routing table in the namespace.
 /// - mount namespace - Allows the process to isolate the overlay FS mounts from others.
-///     `htapod` will mount a new TLS certificate so it can control the trust and
-///     "masquarade" as domains which the process connects to.
+///   `htapod` will mount a new TLS certificate so it can control the trust and
+///   "masquarade" as domains which the process connects to.
 ///
 /// Unless you have control over the network and the trusted certificates, you usually
 /// want `Namespace::unshare_all()`, which will unshare the above namespaces.
@@ -144,7 +144,7 @@ fn unshare_user_namespace() {
     // On some systems, only priv users can create user namespaces. Do this:
     // `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0`
     // TODO: See if we can check that for the user.
-    std::fs::File::create(format!("/proc/self/uid_map"))
+    std::fs::File::create("/proc/self/uid_map".to_string())
         .and_then(|mut f| f.write_all(format!("0 {current_uid} 1\n").as_bytes()))
         .unwrap();
     // The kernel mandates that either:
@@ -156,10 +156,10 @@ fn unshare_user_namespace() {
     // we will take the second option.
     //
     // See user_namespaces(7).
-    std::fs::File::create(format!("/proc/self/setgroups"))
+    std::fs::File::create("/proc/self/setgroups".to_string())
         .and_then(|mut f| f.write_all(b"deny"))
         .unwrap();
-    std::fs::File::create(format!("/proc/self/gid_map"))
+    std::fs::File::create("/proc/self/gid_map".to_string())
         .and_then(|mut f| f.write_all(format!("0 {current_gid} 1\n").as_bytes()))
         .unwrap();
 }
@@ -266,13 +266,7 @@ async fn configure_tun_sinkhole(
     tokio::spawn(connection);
 
     log::debug!("Adding default route.");
-    match add_route(
-        IpNetwork::from_str("0.0.0.0/0").unwrap(),
-        gateway.clone(),
-        handle,
-    )
-    .await
-    {
+    match add_route(IpNetwork::from_str("0.0.0.0/0").unwrap(), gateway, handle).await {
         Ok(()) => log::debug!("Added route to table to the default route table."),
         Err(error) => {
             log::error!("Failed to add route because of error: {:?}.", error);
@@ -280,5 +274,5 @@ async fn configure_tun_sinkhole(
         }
     }
 
-    return tun_device;
+    tun_device
 }

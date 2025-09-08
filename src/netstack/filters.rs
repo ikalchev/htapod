@@ -22,6 +22,12 @@ pub mod udp {
         }
     }
 
+    impl Default for PassthroughUDP {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl UDPFilter for PassthroughUDP {
         /// Forwards all packets from the tunnel interface to the outside world.
         fn handle_tun_udp(
@@ -87,6 +93,12 @@ pub mod tcp {
         }
     }
 
+    impl Default for PassthroughTCP {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl TCPFilter for PassthroughTCP {
         fn on_source_read(&mut self, _data: &[u8]) {}
         fn on_destination_read(&mut self, _data: &[u8]) {}
@@ -126,7 +138,7 @@ pub mod tcp {
                 buffer: Vec::new(),
                 state: HttpParserState::Headers,
                 is_request,
-                output: output,
+                output,
             }
         }
 
@@ -215,7 +227,7 @@ pub mod tcp {
             loop {
                 match self.state {
                     HttpParserState::Headers => {
-                        if self.buffer.len() == 0 {
+                        if self.buffer.is_empty() {
                             break;
                         }
                         match self.try_parse_headers() {
