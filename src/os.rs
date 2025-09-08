@@ -144,7 +144,7 @@ fn unshare_user_namespace() {
     // On some systems, only priv users can create user namespaces. Do this:
     // `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0`
     // TODO: See if we can check that for the user.
-    std::fs::File::create("/proc/self/uid_map".to_string())
+    std::fs::File::create("/proc/self/uid_map")
         .and_then(|mut f| f.write_all(format!("0 {current_uid} 1\n").as_bytes()))
         .unwrap();
     // The kernel mandates that either:
@@ -156,10 +156,10 @@ fn unshare_user_namespace() {
     // we will take the second option.
     //
     // See user_namespaces(7).
-    std::fs::File::create("/proc/self/setgroups".to_string())
+    std::fs::File::create("/proc/self/setgroups")
         .and_then(|mut f| f.write_all(b"deny"))
         .unwrap();
-    std::fs::File::create("/proc/self/gid_map".to_string())
+    std::fs::File::create("/proc/self/gid_map")
         .and_then(|mut f| f.write_all(format!("0 {current_gid} 1\n").as_bytes()))
         .unwrap();
 }
