@@ -1,3 +1,4 @@
+/// This module contains ready to use implementations of a `UDPFilter`.
 pub mod udp {
     use crate::UDPFilter;
     use std::net::SocketAddr;
@@ -5,15 +6,24 @@ pub mod udp {
 
     use crate::netstack::netstack::UDPPacket;
 
+    /// A "noop" UDP stack that just forwards UDP packets without inspecting them.
+    ///
+    /// Use this when you don't want special handling of UDP packets but still want
+    /// to allow UDP traffic to pass from the tunnel interface to the outside world and
+    /// vice versa.
+    ///
+    /// DNS for processes inside the network namespace will work.
     pub struct PassthroughUDP {}
 
     impl PassthroughUDP {
+        /// Create a new `PassthroughUDP` stack.
         pub fn new() -> Self {
             Self {}
         }
     }
 
     impl UDPFilter for PassthroughUDP {
+        /// Forwards all packets from the tunnel interface to the outside world.
         fn handle_tun_udp(
             &mut self,
             data: Vec<u8>,
@@ -32,6 +42,7 @@ pub mod udp {
                 })
         }
 
+        /// Forwards all packets from the outside world to the tunnel interface.
         fn handle_remote_udp(
             &mut self,
             data: Vec<u8>,
@@ -52,15 +63,25 @@ pub mod udp {
     }
 }
 
+/// This module contains ready to use implementations of the `TCPFilter`.
+///
+/// - `PassthroughTCP` - A TCP filter that does nothing.
+/// - `HTTPFilter` - A TCP filter that parses and summarizes HTTP <2 traffic going through `htapod`.
 pub mod tcp {
     use crate::TCPFilter;
     use httparse::{Error, Request, Response};
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 
+    /// A "noop" TCP stack that does nothing.
+    ///
+    /// Use this when you don't want special handling of TCP packets but still want
+    /// to allow TCP traffic to pass from the tunnel interface to the outside world and
+    /// vice versa.
     pub struct PassthroughTCP {}
 
     impl PassthroughTCP {
+        /// Creates a new `PassthroughTCP` filter.
         pub fn new() -> Self {
             Self {}
         }
@@ -71,21 +92,35 @@ pub mod tcp {
         fn on_destination_read(&mut self, _data: &[u8]) {}
     }
 
+    /// Represents the current state of the HTTP parser.
+    #[doc(hidden)]
     #[derive(Debug)]
     enum HttpParserState {
+        /// The parser hasn't parsed all headers yet.
         Headers,
+        /// The parser has parsed all headers but not the whole body. The expected size
+        /// of the body is `length`.
         Body { length: usize },
+        /// The parser encountered an error.
         Error,
     }
 
+    /// A naive HTTP <2 parser.
+    #[doc(hidden)]
     struct HttpParser<O: std::io::Write + Send> {
+        /// The currently read, but unprocessed, bytes.
         buffer: Vec<u8>,
+        /// The current state.
         state: HttpParserState,
+        /// Whether we are parsing a request or a response.
         is_request: bool,
+        /// A writer to which to write HTTP summaries.
         output: O,
     }
 
     impl<Output: std::io::Write + Send> HttpParser<Output> {
+        /// Creates a new parser.
+        #[doc(hidden)]
         fn new(is_request: bool, output: Output) -> Self {
             HttpParser {
                 buffer: Vec::new(),
@@ -95,7 +130,12 @@ pub mod tcp {
             }
         }
 
-        // Returns the offset to the beginning of the body and the expected content length.
+        /// Attempts to parse the HTTP status line and headers.
+        ///
+        /// Returns the offset to the beginning of the body and the expected content length.
+        ///
+        /// Supports at most 16 headers.
+        #[doc(hidden)]
         fn try_parse_headers(&mut self) -> Result<Option<(usize, usize)>, Error> {
             let mut headers = [httparse::EMPTY_HEADER; 16];
             enum Message<'a, 'b> {
@@ -132,8 +172,8 @@ pub mod tcp {
 
                     log::trace!("{}", str::from_utf8(&self.buffer).unwrap());
 
-                    // TODO: Can be malformed req/resp - check if the request is
-                    // GET/HEAD or the response is 204 No Content.
+                    // TODO: Can be malformed/unsupported req/resp - check if the request is
+                    // GET/HEAD or the response is 204 No Content or chunked encoding...
                     let result = self
                         .output
                         .write(format!("{} {} bytes\n", log_line, content_length).as_bytes());
@@ -151,6 +191,8 @@ pub mod tcp {
             }
         }
 
+        /// Attempts to parse a body of the given length from the contents of the buffer.
+        #[doc(hidden)]
         fn try_parse_body(&mut self, length: usize) -> Option<Vec<u8>> {
             if self.buffer.len() >= length {
                 let body = self.buffer.drain(..length).collect();
@@ -160,6 +202,10 @@ pub mod tcp {
             }
         }
 
+        /// Process the newly read data from the wire.
+        ///
+        /// This method will continuously try to decode HTTP messages until it
+        /// encounters an error or runs out of data.
         fn on_data(&mut self, data: &[u8]) {
             if data.is_empty() {
                 return;
@@ -212,6 +258,8 @@ pub mod tcp {
             }
         }
 
+        /// For testing - just get the writer so we can inspect it.
+        #[doc(hidden)]
         #[cfg(test)]
         fn stop(self) -> Output {
             self.output
@@ -326,6 +374,12 @@ pub mod tcp {
         }
     }
 
+    /// A `TCPFilter` that parses and summarizes HTTP <2 messages.
+    ///
+    /// For every parsed request, it will write a line
+    /// `--> <METHOD> <PATH> <body length> bytes`
+    /// in the writer and for every parsed response, it will write a line
+    /// `<-- <STATUS CODE> <body length> bytes`.
     pub struct HttpFilter<Output: std::io::Write + Send> {
         request_parser: HttpParser<SharedWriter<Output>>,
         response_parser: HttpParser<SharedWriter<Output>>,

@@ -379,6 +379,32 @@ impl<UH: UDPFilter> UDPStack<UH> {
         UDPStack { handler }
     }
 
+    /// Start handling UDP packets between the outside world and the tunnel interface.
+    ///
+    /// This method spawns two tasks - one that listens for packets from the virtual
+    /// tunnel interface and one from the outside world. We have the following flow of packets:
+    /// - From the tunnel interface to the world: `world <-- userspace netstack <-- tun`
+    /// - From the outside world to (an address behind) the tunnel interface: `world --> userspace netstack --> tun`
+    ///
+    /// Specifically, let's take a DNS packet going from the tunnel interface to the outside
+    /// world (forget DNS uses port 53 for the moment):
+    /// 1. The packet is initially sent by the process having a source address of
+    ///     `<privIP:privPort>` and a destination address of `<pubIP:pubPort>`.
+    /// 2. The packet goes into the tunnel interface and is delivered to `htapod` through
+    ///     the userspace network stack. Now `htapod` needs to forward the packet to the
+    ///     destination. However, it will now use an IP address and port from the root
+    ///     network namespace, so the source address is going to change to `<htapodIP:htapodPort>`.
+    /// 3. The remote peer receives the DNS query and must now respond. It uses the original source
+    ///     address and sends a UDP packet with a destination address `<htapodIP:htapodPort>` and
+    ///     a source address `<pubIP:other_pubPort>`.
+    /// 4. `htapod` receives this UDP packet and now needs to forward it inside the tunnel
+    ///     interface to the process running inside the network namespace. To do this correctly,
+    ///     `htapod` must have remembered that it mapped the source address from step 1 to its
+    ///     source address in step 2 above, i.e. it must implement an SNAT and know that a
+    ///     packet destined to `<htapodIP:htapodPort>` must be forwarded to `<privIP:privPort>`.
+    /// 5. After doing the SNAT, the packet is sent to the process over the networkstack
+    ///     through the virtual tunnel interface.
+    #[doc(hidden)]
     async fn handle_udp(
         mut self,
         udp_socket: netstack_smoltcp::UdpSocket,
@@ -488,11 +514,25 @@ impl<UH: UDPFilter> UDPStack<UH> {
     }
 }
 
+/// Runs a userspace network stack with the given configuration.
+///
+/// Returns a handle for gracefully shutting down the network stack and stopping all
+/// packet listeners.
+///
+/// - `tcp_stack` - An optional TCP stack. If `None`, the userspace network stack will not
+///     handle TCP packets.
+/// - `udp_stack` - An optional UDP stack. If `None`, the userspace network stack will not
+///     handle UDP packets.
+/// - `tun_device` - The tunnel interface from which the userspace network will read
+///     packets.
+/// - `root_ca` - The root TLS certificate to use when generating TLS certificates on the
+///     fly.
+#[doc(hidden)]
 pub(crate) fn run<TH, TR, UH>(
     tcp_stack: Option<TCPStack<TH, TR>>,
     udp_stack: Option<UDPStack<UH>>,
     tun_device: AsyncDevice,
-    root_ca: rcgen::CertifiedKey,
+    root_ca: rcgen::CertifiedKey, // TODO: this is needed only in case of TCP.
 ) -> StopNetstack
 where
     TH: TCPFilter + Send + 'static,
