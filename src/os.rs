@@ -3,17 +3,23 @@ use ipnetwork::IpNetwork;
 use rtnetlink::{new_connection, Error, Handle};
 use std::{io::Write, net::IpAddr, str::FromStr};
 
-pub struct TunInterfaceConfig {
+/// Defines the confiration of the tunnel interface.
+pub struct TUNInterfaceConfig {
+    /// The interface name.
     tun_name: String,
+    /// The interface address.
     address: IpAddr,
+    /// The interface address network mask.
     netmask: IpAddr,
+    /// The gateway address that the interface provides.
     gateway: IpAddr,
 }
 
-impl Default for TunInterfaceConfig {
+impl Default for TUNInterfaceConfig {
+    /// Creats a default `TUNInterfaceConfig` with a name `htapod` and some address.
     fn default() -> Self {
         let address = ipnet::IpNet::from_str("10.1.11.4/24").unwrap();
-        TunInterfaceConfig {
+        TUNInterfaceConfig {
             tun_name: "htapod".to_owned(),
             address: address.addr(),
             netmask: address.netmask(),
@@ -22,57 +28,81 @@ impl Default for TunInterfaceConfig {
     }
 }
 
-impl TunInterfaceConfig {
+impl TUNInterfaceConfig {
+    /// Creats a tunnel interface from the config.
     pub async fn create(&self) -> tun::AsyncDevice {
         configure_tun_sinkhole(&self.tun_name, self.address, self.netmask, self.gateway).await
     }
 
+    /// Returns the gateway of the tunnel interface.
     pub fn gateaway(&self) -> IpAddr {
         self.gateway
     }
 }
 
-#[derive(Default)]
+/// Defines the linux namespace environment.
+///
+/// This allows configuration of which namespaces are unshared before the user process
+/// is started.
+///
+/// By default `htapod` unshares the following namespaces:
+/// - user namespace - This allows unprivileged processes to create network interfaces,
+///     modify the routing table and mount filesystems.
+/// - network namespace - This allows the network interfaces that are present on the host
+///     to be invisible to processes running in the new namespace. It also creates a new
+///     routing table in the namespace.
+/// - mount namespace - Allows the process to isolate the overlay FS mounts from others.
+///     `htapod` will mount a new TLS certificate so it can control the trust and
+///     "masquarade" as domains which the process connects to.
+///
+/// Unless you have control over the network and the trusted certificates, you usually
+/// want `Namespace::unshare_all()`, which will unshare the above namespaces.
 pub struct Namespace {
-    with_user_namespace: bool,
-    with_net_namespace: bool,
-    with_mount_namespace: bool,
+    unshare_user_namespace: bool,
+    unshare_net_namespace: bool,
+    unshare_mount_namespace: bool,
 }
 
 impl Namespace {
-    pub fn new() -> Self {
+    /// Creates a new namespace environment that will unshare the user, network and mount
+    /// namespaces.
+    pub fn unshare_all() -> Self {
         Self {
-            with_user_namespace: true,
-            with_net_namespace: true,
-            with_mount_namespace: true,
+            unshare_user_namespace: true,
+            unshare_net_namespace: true,
+            unshare_mount_namespace: true,
         }
     }
 
-    pub fn with_user_namespace(mut self, with_user_namespace: bool) -> Self {
-        self.with_user_namespace = with_user_namespace;
+    /// Sets whether to unshare the user namespace.
+    pub fn unshare_user_namespace(mut self, unshare_user_namespace: bool) -> Self {
+        self.unshare_user_namespace = unshare_user_namespace;
         self
     }
 
-    pub fn with_net_namespace(mut self, with_net_namespace: bool) -> Self {
-        self.with_net_namespace = with_net_namespace;
+    /// Sets whether to unshare the network namespace.
+    pub fn unshare_net_namespace(mut self, unshare_net_namespace: bool) -> Self {
+        self.unshare_net_namespace = unshare_net_namespace;
         self
     }
 
-    pub fn with_mount_namespace(mut self, with_mount_namespace: bool) -> Self {
-        self.with_mount_namespace = with_mount_namespace;
+    /// Sets whether to unshare the mount namespace.
+    pub fn unshare_mount_namespace(mut self, unshare_mount_namespace: bool) -> Self {
+        self.unshare_mount_namespace = unshare_mount_namespace;
         self
     }
 
+    /// Spawns the namespace environment, unsharing the configured namespaces.
     pub async fn spawn(self) {
-        if self.with_user_namespace {
+        if self.unshare_user_namespace {
             unshare_user_namespace();
         }
 
-        if self.with_net_namespace {
+        if self.unshare_net_namespace {
             unshare_net_namespace();
         }
 
-        if self.with_mount_namespace {
+        if self.unshare_mount_namespace {
             unshare_mount_namespace();
         }
 
@@ -83,6 +113,14 @@ impl Namespace {
                 //return Err(()); TODO
             }
         };
+    }
+}
+
+impl Default for Namespace {
+    /// Returns a namespace environment that will unshare all needed namespaces
+    /// (same as `unshare_all`).
+    fn default() -> Self {
+        Self::unshare_all()
     }
 }
 
@@ -152,12 +190,19 @@ fn unshare_mount_namespace() {
         Some("ignored"),
         "/",
         Some("ignored"),
+        // Do not share the mount.
         nix::mount::MsFlags::MS_PRIVATE | nix::mount::MsFlags::MS_REC,
         Some("ignored"),
     )
     .unwrap_or_else(|e| panic!("Failed to isolate root fs: {e}")); // TODO
 }
 
+/// Adds a route to the main routing table.
+///
+/// - `dest` - The target network of the route.
+/// - `gateway` - The network gateway to be used for the given `dest`.
+/// - `handle` - A rtnetlink connection handle to use.
+#[doc(hidden)]
 async fn add_route(dest: IpNetwork, gateway: IpAddr, handle: Handle) -> Result<(), Error> {
     match (dest, gateway) {
         (IpNetwork::V4(dest), IpAddr::V4(gateway)) => {
@@ -179,6 +224,7 @@ async fn add_route(dest: IpNetwork, gateway: IpAddr, handle: Handle) -> Result<(
     }
 }
 
+/// Bring the network interface with the given name up.
 async fn link_up(name: &str) -> Result<(), Error> {
     let (connection, handle, _) = new_connection().unwrap();
     tokio::spawn(connection);
@@ -192,7 +238,13 @@ async fn link_up(name: &str) -> Result<(), Error> {
     }
 }
 
-pub async fn configure_tun_sinkhole(
+/// Creates and configures a tunnel interface.
+///
+/// - `tun_name` - The name of the interface.
+/// - `address` - The interface address.
+/// - `netmask` - The interface address network mask.
+/// - `gateway` - The gateway that the interface provides.
+async fn configure_tun_sinkhole(
     tun_name: &str,
     address: IpAddr,
     netmask: IpAddr,

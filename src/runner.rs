@@ -41,7 +41,7 @@ where
     UDPFilter: crate::UDPFilter + Send + 'static,
 {
     namespace: Option<crate::Namespace>,
-    tun_interface_config: Option<crate::os::TunInterfaceConfig>,
+    tun_interface_config: Option<crate::os::TUNInterfaceConfig>,
     tcp_stack: Option<TCPStack<TCPFilter, TCPRouter>>,
     udp_stack: Option<UDPStack<UDPFilter>>,
 }
@@ -61,12 +61,12 @@ where
         }
     }
 
-    pub fn namespace(mut self, namespace: crate::Namespace) -> Self {
+    pub fn with_namespace(mut self, namespace: crate::Namespace) -> Self {
         self.namespace = Some(namespace);
         self
     }
 
-    pub fn tun_interface_config(mut self, config: crate::os::TunInterfaceConfig) -> Self {
+    pub fn tun_interface_config(mut self, config: crate::os::TUNInterfaceConfig) -> Self {
         self.tun_interface_config = Some(config);
         self
     }
@@ -129,7 +129,7 @@ pub struct Runner<
     UDPFilter: crate::UDPFilter + Send + 'static,
 > {
     namespace: crate::Namespace,
-    tun_interface_config: crate::os::TunInterfaceConfig,
+    tun_interface_config: crate::os::TUNInterfaceConfig,
     tcp_stack: Option<TCPStack<TCPFilter, TCPRouter>>,
     udp_stack: Option<UDPStack<UDPFilter>>,
 

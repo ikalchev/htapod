@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 async-send-fd = { version = "1.2.0", features = ["tokio"] }
-bytes = "1.10.0"
 clap = { version = "4.5.29", features = ["derive"] }
 env_logger = "0.11.7"
 futures = "0.3.31"

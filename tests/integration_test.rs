@@ -28,12 +28,7 @@ fn test_passthrough_tcp() {
 
     let localhost = "10.10.10.10";
     let htap = htapod::runner::builder()
-        .namespace(
-            Namespace::new()
-                .with_user_namespace(true)
-                .with_net_namespace(true)
-                .with_mount_namespace(true),
-        )
+        .with_namespace(Namespace::unshare_all())
         .with_tcp_stack(
             PassthroughTCP::new(),
             MatchAddress::new(
@@ -114,12 +109,7 @@ fn test_server() {
 
     let localhost = "10.10.10.10";
     let htap = htapod::runner::builder()
-        .namespace(
-            Namespace::new()
-                .with_user_namespace(true)
-                .with_net_namespace(true)
-                .with_mount_namespace(true),
-        )
+        .with_namespace(Namespace::unshare_all())
         .with_tcp_stack(
             PassthroughTCP::new(),
             MatchAddress::new(

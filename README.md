@@ -8,11 +8,15 @@ and from it, without requiring root permissions.
 This project was inspired by [httptap](https://github.com/monasticacademy/httptap).
 It has a slighly different approach, so it might be interesting to check it out!
 
-**This project is currently work in progress.** There are a lot of rough edges
-and you might need to extend the out-of-the-box filters for your use case.
+**This project is currently work in progress and is purely educational.** There are a lot of
+rough edges and you might need to extend the out-of-the-box filters for your use case.
 
 _NOTE_: On some distributions you might need to tweak app armour to allow
 unpriviliged users to create user namespaces with `sysctl kernel.apparmor_restrict_unprivileged_userns=0`.
+
+Roadmap:
+- Properly parse and summarize HTTP messages.
+- Allow to "grep" for certain patterns in the traffic.
 
 ## Example
 
@@ -55,13 +59,6 @@ fn main() {
     unsafe { htap.run(cmd[0], cmd[1..].iter()) };
 }
 ```
-
-## Why?
-
-As a learning exercise, mostly. There is no end goal, but I would like to add
-these soon:
-- Properly infer request/response sizes.
-- Option to "grep" for certain patterns in the traffic.
 
 ## How does it work?
 
