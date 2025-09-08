@@ -37,12 +37,7 @@ fn main() {
     let verify_remote_tls_cert = true;
 
     let htap = htapod::runner::builder()
-        .namespace(
-            Namespace::new()
-                .with_user_namespace(true)
-                .with_net_namespace(true)
-                .with_mount_namespace(true),
-        )
+        .with_namespace(Namespace::unshare_all())
         .with_tcp_stack(
             // Write your own TCP sniffer or use a provided one.
             PassthroughTCP::new(),
@@ -89,12 +84,7 @@ in the root network namespace. So for example, if you have a server running on
 ```rust
 let localhost = "10.10.10.10";
 let htap = htapod::runner::builder()
-    .namespace(
-        Namespace::new()
-            .with_user_namespace(true)
-            .with_net_namespace(true)
-            .with_mount_namespace(true),
-    )
+    .with_namespace(Namespace::unshare_all())
     .with_tcp_stack(
         PassthroughTCP::new(),
         MatchAddress::new(
