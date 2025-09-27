@@ -63,8 +63,7 @@ fn main() {
 
 ### Networking
 
-A non-root user cannot "stear" all traffic at will, but it could if it _unshares_ the root
-level resources of a system. Specifically, `htapod` uses the `unshare` system call to
+`htapod` uses the `unshare` system call to
 move into a new user namespace and a new network namespace. In these new namespaces,
 it creates a virtual TUN interface and modifies the routing table so all packets
 pass through that interface. A TUN interface is a virtual network interface that is
@@ -163,6 +162,22 @@ process. From the man page of unshare:
 
 So any initialisation of the tokio runtime must happen after the `unshare` call if we are
 to use multiple threads.
+
+## Complete flow
+
+Assume we start `htapod` with the command `htapod -- curl https://google.com`. The steps
+below outline the how `htapod` can tap into the communication of the subprocess.
+
+1. The main process creates a `socketpair`.
+2. The process makes the `fork` system call.
+3. The child process unshares the user, network and mount namespaces.
+4. The child proces configures the TUN interface and the TLS trust.
+5. The child process sends the file descriptor for the TUN interface over its end of the `socketpair`.
+6. The main process reads the file descriptor and uses it to set up user space networking.
+7. The main process signals the child process (through the socketpair) that it is ready to
+proxy traffic.
+8. The child process executes the user-given command - in this case `curl https://google.com`.
+9. The main process handles any UDP and TCP packets from `curl` and routes them appropriately.
 
 ## Resources and references
 
