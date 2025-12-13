@@ -12,6 +12,43 @@ use rustls_platform_verifier::ConfigVerifierExt;
 use tokio::{select, sync::mpsc::UnboundedSender};
 use tun::AsyncDevice;
 
+/// Helper function to set up bidirectional stream copying with inspection.
+///
+/// This function handles the common pattern of splitting streams, applying filters,
+/// and copying data bidirectionally between two streams.
+async fn setup_stream_copy<TH, S1, S2>(
+    source_stream: S1,
+    destination_stream: S2,
+    tcp_filter: Arc<Mutex<TH>>,
+) where
+    TH: TCPFilter,
+    S1: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    S2: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let (source_reader, source_writer) = tokio::io::split(source_stream);
+    let (destination_reader, destination_writer) = tokio::io::split(destination_stream);
+
+    let tcp_filter_source = tcp_filter.clone();
+    let source_reader = tokio_util::io::InspectReader::new(source_reader, move |data: &[u8]| {
+        let mut filter = tcp_filter_source.lock().unwrap();
+        filter.on_source_read(data);
+    });
+
+    let destination_reader = tokio_util::io::InspectReader::new(destination_reader, move |data: &[u8]| {
+        let mut filter = tcp_filter.lock().unwrap();
+        filter.on_destination_read(data);
+    });
+
+    let mut in_stream = tokio::io::join(source_reader, source_writer);
+    let mut remote_stream = tokio::io::join(destination_reader, destination_writer);
+    
+    let result = tokio::io::copy_bidirectional(&mut in_stream, &mut remote_stream).await;
+    match result {
+        Ok((from, to)) => log::debug!("Copied {} bytes from, {} bytes to.", from, to),
+        Err(error) => log::error!("Failed to copy between streams: {:?}", error),
+    }
+}
+
 /// A TCP filter allows you to observe the TCP traffic going into and out of the
 /// virtual tunnel interface.
 ///
@@ -151,31 +188,7 @@ impl<TH: TCPFilter, TR: TCPRouter> TCPStack<TH, TR> {
     ) {
         match tokio::net::TcpStream::connect(remote_address).await {
             Ok(remote_stream) => {
-                let (source_reader, source_writer) = tokio::io::split(tcp_stream);
-                let (destination_reader, destination_writer) = tokio::io::split(remote_stream);
-
-                let inspect_source = tcp_filter.clone();
-                let source_reader =
-                    tokio_util::io::InspectReader::new(source_reader, move |data| {
-                        let mut inspect_source = inspect_source.lock().unwrap();
-                        inspect_source.on_source_read(data);
-                    });
-
-                let inspect_destination = tcp_filter;
-                let destination_reader =
-                    tokio_util::io::InspectReader::new(destination_reader, move |data| {
-                        let mut inspect_destination = inspect_destination.lock().unwrap();
-                        inspect_destination.on_destination_read(data)
-                    });
-
-                let mut in_stream = tokio::io::join(source_reader, source_writer);
-                let mut remote_stream = tokio::io::join(destination_reader, destination_writer);
-                let result =
-                    tokio::io::copy_bidirectional(&mut in_stream, &mut remote_stream).await;
-                match result {
-                    Ok((from, to)) => log::debug!("Copied {} bytes from, {} bytes to.", from, to),
-                    Err(error) => log::error!("Failed to copy between streams: {:?}", error),
-                }
+                setup_stream_copy(tcp_stream, remote_stream, tcp_filter).await;
             }
             Err(e) => {
                 log::error!(
@@ -273,31 +286,7 @@ impl<TH: TCPFilter, TR: TCPRouter> TCPStack<TH, TR> {
                 let remote_address = ServerName::try_from(remote_address).unwrap();
                 let remote_stream = connector.connect(remote_address, stream).await.unwrap(); // TODO
 
-                let (source_reader, source_writer) = tokio::io::split(tls_stream);
-                let (destination_reader, destination_writer) = tokio::io::split(remote_stream);
-
-                let inspect_source = tcp_filter.clone();
-                let source_reader =
-                    tokio_util::io::InspectReader::new(source_reader, move |data| {
-                        let mut inspect_source = inspect_source.lock().unwrap();
-                        inspect_source.on_source_read(data);
-                    });
-
-                let inspect_destination = tcp_filter;
-                let destination_reader =
-                    tokio_util::io::InspectReader::new(destination_reader, move |data| {
-                        let mut inspect_destination = inspect_destination.lock().unwrap();
-                        inspect_destination.on_destination_read(data)
-                    });
-
-                let mut in_stream = tokio::io::join(source_reader, source_writer);
-                let mut remote_stream = tokio::io::join(destination_reader, destination_writer);
-                let result =
-                    tokio::io::copy_bidirectional(&mut in_stream, &mut remote_stream).await;
-                match result {
-                    Ok((from, to)) => log::debug!("Copied {} bytes from, {} bytes to.", from, to),
-                    Err(error) => log::error!("Failed to copy between streams: {:?}", error),
-                }
+                setup_stream_copy(tls_stream, remote_stream, tcp_filter).await;
             }
             Err(_) => {
                 todo!("handle");

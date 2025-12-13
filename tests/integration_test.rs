@@ -11,7 +11,7 @@ use tokio::net::TcpListener;
 
 #[test]
 fn test_passthrough_tcp() {
-    env_logger::builder().is_test(true).try_init();
+    let _ = env_logger::builder().is_test(true).try_init();
     // Spawn a mock server with a POST path /dino that expects some
     // payload. Then run curl under htapod and check that both the request
     // and the response content is intact.
