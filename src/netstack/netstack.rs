@@ -34,14 +34,15 @@ async fn setup_stream_copy<TH, S1, S2>(
         filter.on_source_read(data);
     });
 
-    let destination_reader = tokio_util::io::InspectReader::new(destination_reader, move |data: &[u8]| {
-        let mut filter = tcp_filter.lock().unwrap();
-        filter.on_destination_read(data);
-    });
+    let destination_reader =
+        tokio_util::io::InspectReader::new(destination_reader, move |data: &[u8]| {
+            let mut filter = tcp_filter.lock().unwrap();
+            filter.on_destination_read(data);
+        });
 
     let mut in_stream = tokio::io::join(source_reader, source_writer);
     let mut remote_stream = tokio::io::join(destination_reader, destination_writer);
-    
+
     let result = tokio::io::copy_bidirectional(&mut in_stream, &mut remote_stream).await;
     match result {
         Ok((from, to)) => log::debug!("Copied {} bytes from, {} bytes to.", from, to),

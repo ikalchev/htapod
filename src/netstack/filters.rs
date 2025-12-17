@@ -128,17 +128,28 @@ pub mod tcp {
         is_request: bool,
         /// A writer to which to write HTTP summaries.
         output: O,
+        /// Configuration for what to log.
+        config: HttpFilterConfig,
+        /// Start time for timing calculations.
+        start_time: Option<std::time::Instant>,
     }
 
     impl<Output: std::io::Write + Send> HttpParser<Output> {
         /// Creates a new parser.
         #[doc(hidden)]
-        fn new(is_request: bool, output: Output) -> Self {
+        fn new(is_request: bool, output: Output, config: HttpFilterConfig) -> Self {
+            let config_clone = config.clone();
             HttpParser {
                 buffer: Vec::new(),
                 state: HttpParserState::Headers,
                 is_request,
                 output,
+                config: config_clone,
+                start_time: if config.log_timing {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                },
             }
         }
 
@@ -165,7 +176,10 @@ pub mod tcp {
 
             match status? {
                 httparse::Status::Complete(body_offset) => {
-                    let log_line = match message {
+                    let mut log_lines = Vec::new();
+
+                    // Basic request/response line
+                    let basic_line = match message {
                         Message::Req(request) => {
                             format!("--> {} {}", request.method.unwrap(), request.path.unwrap())
                         }
@@ -173,6 +187,7 @@ pub mod tcp {
                             format!("<-- {}", response.code.unwrap())
                         }
                     };
+                    log_lines.push(basic_line);
 
                     // Check for Content-Length header
                     let content_length = headers
@@ -182,19 +197,48 @@ pub mod tcp {
                         .and_then(|v| v.parse::<usize>().ok())
                         .unwrap_or(0);
 
+                    // Log headers if configured
+                    if (self.is_request && self.config.log_request_headers)
+                        || (!self.is_request && self.config.log_response_headers)
+                    {
+                        for header in headers.iter() {
+                            if !header.name.is_empty() {
+                                let header_line = format!(
+                                    "  {}: {}",
+                                    header.name,
+                                    str::from_utf8(header.value).unwrap_or("<invalid utf-8>")
+                                );
+                                log_lines.push(header_line);
+                            }
+                        }
+                    }
+
+                    // Add byte count
+                    let byte_line = format!(
+                        "{} {} bytes",
+                        if self.is_request { ">>>" } else { "<<<" },
+                        content_length
+                    );
+                    log_lines.push(byte_line);
+
+                    // Add timing if configured
+                    if let Some(start_time) = self.start_time {
+                        let duration = start_time.elapsed();
+                        let timing_line = format!("  Timing: {:?}", duration);
+                        log_lines.push(timing_line);
+                        self.start_time = Some(std::time::Instant::now()); // Reset for next message
+                    }
+
                     log::trace!("{}", str::from_utf8(&self.buffer).unwrap());
 
-                    // TODO: Can be malformed/unsupported req/resp - check if the request is
-                    // GET/HEAD or the response is 204 No Content or chunked encoding...
-                    let result = self
-                        .output
-                        .write(format!("{} {} bytes\n", log_line, content_length).as_bytes());
-                    match result {
-                        Ok(_) => (),
-                        Err(error) => {
-                            log::error!("Failed to write HTTP status to output: {:?}", error)
+                    // Write all log lines
+                    for line in log_lines {
+                        let result = self.output.write(format!("{}\n", line).as_bytes());
+                        if let Err(error) = result {
+                            log::error!("Failed to write HTTP status to output: {:?}", error);
+                            break;
                         }
-                    };
+                    }
 
                     Ok(Some((body_offset, content_length)))
                 }
@@ -207,7 +251,29 @@ pub mod tcp {
         #[doc(hidden)]
         fn try_parse_body(&mut self, length: usize) -> Option<Vec<u8>> {
             if self.buffer.len() >= length {
-                let body = self.buffer.drain(..length).collect();
+                let body: Vec<u8> = self.buffer.drain(..length).collect();
+
+                // Log body if configured and within size limits
+                let should_log_body = if self.is_request {
+                    self.config.log_request_bodies
+                } else {
+                    self.config.log_response_bodies
+                };
+
+                if should_log_body && body.len() <= self.config.max_body_size {
+                    let body_str = str::from_utf8(&body).unwrap_or("<binary data>");
+                    let body_line = if body_str.len() > 100 {
+                        // Truncate long bodies
+                        format!("  Body: {}... ({} bytes)", &body_str[..100], body.len())
+                    } else {
+                        format!("  Body: {}", body_str)
+                    };
+
+                    if let Err(error) = self.output.write(format!("{}\n", body_line).as_bytes()) {
+                        log::error!("Failed to write HTTP body to output: {:?}", error);
+                    }
+                }
+
                 Some(body)
             } else {
                 None
@@ -299,46 +365,46 @@ pub mod tcp {
         #[test]
         fn test_request_parser_with_no_content() {
             let mock = MockWriter { data: Vec::new() };
-            let mut parser = HttpParser::new(true, mock);
+            let mut parser = HttpParser::new(true, mock, HttpFilterConfig::default());
 
             parser.on_data(b"GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n");
             assert_eq!(
                 str::from_utf8(&parser.stop().data).unwrap(),
-                str::from_utf8(b"--> GET /index.html 0 bytes\n").unwrap()
+                str::from_utf8(b"--> GET /index.html\n>>> 0 bytes\n").unwrap()
             )
         }
 
         #[test]
         fn test_request_parser_with_content() {
             let mock = MockWriter { data: Vec::new() };
-            let mut parser = HttpParser::new(true, mock);
+            let mut parser = HttpParser::new(true, mock, HttpFilterConfig::default());
 
             parser
                 .on_data(b"POST /api HTTP/1.1\r\nHost: example.com\r\nContent-Length: 2\r\n\r\naa");
             assert_eq!(
                 str::from_utf8(&parser.stop().data).unwrap(),
-                str::from_utf8(b"--> POST /api 2 bytes\n").unwrap()
+                str::from_utf8(b"--> POST /api\n>>> 2 bytes\n").unwrap()
             )
         }
 
         #[test]
         fn test_request_parser_with_split_content() {
             let mock = MockWriter { data: Vec::new() };
-            let mut parser = HttpParser::new(true, mock);
+            let mut parser = HttpParser::new(true, mock, HttpFilterConfig::default());
 
             parser
                 .on_data(b"POST /api HTTP/1.1\r\nHost: example.com\r\nContent-Length: 4\r\n\r\naa");
             parser.on_data(b"aa");
             assert_eq!(
                 str::from_utf8(&parser.stop().data).unwrap(),
-                str::from_utf8(b"--> POST /api 4 bytes\n").unwrap()
+                str::from_utf8(b"--> POST /api\n>>> 4 bytes\n").unwrap()
             )
         }
 
         #[test]
         fn test_request_parser_with_multiple_requests() {
             let mock = MockWriter { data: Vec::new() };
-            let mut parser = HttpParser::new(true, mock);
+            let mut parser = HttpParser::new(true, mock, HttpFilterConfig::default());
 
             parser.on_data(b"GET /api HTTP/1.1\r\nHost: example.com\r\n\r\n");
             parser
@@ -349,7 +415,7 @@ pub mod tcp {
             assert_eq!(
                 str::from_utf8(&parser.stop().data).unwrap(),
                 str::from_utf8(
-                    b"--> GET /api 0 bytes\n--> POST /api 4 bytes\n--> POST /api 2 bytes\n"
+                    b"--> GET /api\n>>> 0 bytes\n--> POST /api\n>>> 4 bytes\n--> POST /api\n>>> 2 bytes\n"
                 )
                 .unwrap()
             )
@@ -386,24 +452,63 @@ pub mod tcp {
         }
     }
 
+    /// Configuration for HTTP filtering.
+    #[derive(Debug, Clone)]
+    pub struct HttpFilterConfig {
+        pub log_request_headers: bool,
+        pub log_response_headers: bool,
+        pub log_request_bodies: bool,
+        pub log_response_bodies: bool,
+        pub max_body_size: usize,
+        pub log_timing: bool,
+    }
+
+    impl Default for HttpFilterConfig {
+        fn default() -> Self {
+            Self {
+                log_request_headers: false,
+                log_response_headers: false,
+                log_request_bodies: false,
+                log_response_bodies: false,
+                max_body_size: 1024, // 1KB default
+                log_timing: false,
+            }
+        }
+    }
+
     /// A `TCPFilter` that parses and summarizes HTTP <2 messages.
     ///
     /// For every parsed request, it will write a line
     /// `--> <METHOD> <PATH> <body length> bytes`
     /// in the writer and for every parsed response, it will write a line
     /// `<-- <STATUS CODE> <body length> bytes`.
+    ///
+    /// With enhanced configuration, it can log headers, bodies, and timing information.
     pub struct HttpFilter<Output: std::io::Write + Send> {
         request_parser: HttpParser<SharedWriter<Output>>,
         response_parser: HttpParser<SharedWriter<Output>>,
+        config: HttpFilterConfig,
     }
 
     impl<Output: std::io::Write + Send> HttpFilter<Output> {
+        /// Create a new HTTP filter with default configuration.
         pub fn new(output: Output) -> HttpFilter<Output> {
+            Self::new_with_config(output, HttpFilterConfig::default())
+        }
+
+        /// Create a new HTTP filter with custom configuration.
+        pub fn new_with_config(output: Output, config: HttpFilterConfig) -> HttpFilter<Output> {
             let output = SharedWriter::new(output);
             HttpFilter {
-                request_parser: HttpParser::new(true, output.clone()),
-                response_parser: HttpParser::new(false, output),
+                request_parser: HttpParser::new(true, output.clone(), config.clone()),
+                response_parser: HttpParser::new(false, output, config.clone()),
+                config,
             }
+        }
+
+        /// Get the current configuration.
+        pub fn config(&self) -> &HttpFilterConfig {
+            &self.config
         }
     }
 
