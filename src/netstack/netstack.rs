@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::router::TCPRouter;
+use crate::{netstack::filters::tcp, router::TCPRouter};
 use futures::{SinkExt, StreamExt};
 use rcgen::SanType;
 use rustls::pki_types::ServerName;
@@ -16,79 +16,62 @@ use tun::AsyncDevice;
 ///
 /// This function handles the common pattern of splitting streams, applying filters,
 /// and copying data bidirectionally between two streams.
-async fn setup_stream_copy<TH, S1, S2>(
-    source_stream: S1,
-    destination_stream: S2,
-    tcp_filter: Arc<Mutex<TH>>,
-) where
-    TH: TCPFilter,
-    S1: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-    S2: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    let (source_reader, source_writer) = tokio::io::split(source_stream);
-    let (destination_reader, destination_writer) = tokio::io::split(destination_stream);
+// async fn setup_stream_copy<TH, S1, S2>(
+//     source_stream: S1,
+//     destination_stream: S2,
+//     tcp_filter: Arc<Mutex<TH>>,
+// ) where
+//     TH: TCPFilter,
+//     S1: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+//     S2: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+// {
+//     let (source_reader, source_writer) = tokio::io::split(source_stream);
+//     let (destination_reader, destination_writer) = tokio::io::split(destination_stream);
 
-    let tcp_filter_source = tcp_filter.clone();
-    let source_reader = tokio_util::io::InspectReader::new(source_reader, move |data: &[u8]| {
-        let mut filter = tcp_filter_source.lock().unwrap();
-        filter.on_source_read(data);
-    });
+//     let tcp_filter_source = tcp_filter.clone();
+//     let source_reader = tokio_util::io::InspectReader::new(source_reader, move |data: &[u8]| {
+//         let mut filter = tcp_filter_source.lock().unwrap();
+//         filter.on_source_read(data);
+//     });
 
-    let destination_reader =
-        tokio_util::io::InspectReader::new(destination_reader, move |data: &[u8]| {
-            let mut filter = tcp_filter.lock().unwrap();
-            filter.on_destination_read(data);
-        });
+//     let destination_reader =
+//         tokio_util::io::InspectReader::new(destination_reader, move |data: &[u8]| {
+//             let mut filter = tcp_filter.lock().unwrap();
+//             filter.on_destination_read(data);
+//         });
 
-    let mut in_stream = tokio::io::join(source_reader, source_writer);
-    let mut remote_stream = tokio::io::join(destination_reader, destination_writer);
+//     let mut in_stream = tokio::io::join(source_reader, source_writer);
+//     let mut remote_stream = tokio::io::join(destination_reader, destination_writer);
 
-    let result = tokio::io::copy_bidirectional(&mut in_stream, &mut remote_stream).await;
-    match result {
-        Ok((from, to)) => log::debug!("Copied {} bytes from, {} bytes to.", from, to),
-        Err(error) => log::error!("Failed to copy between streams: {:?}", error),
+//     let result = tokio::io::copy_bidirectional(&mut in_stream, &mut remote_stream).await;
+//     match result {
+//         Ok((from, to)) => log::debug!("Copied {} bytes from, {} bytes to.", from, to),
+//         Err(error) => log::error!("Failed to copy between streams: {:?}", error),
+//     }
+// }
+
+pub trait Stream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+
+pub trait TCPFilter: Send {
+    fn prepare(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
+
+    fn handle_new_connection(
+        &mut self,
+        userspace_address: SocketAddr,
+        // Box because we want to erase the type of the www stream which can be
+        // a TLS stream or a plain TCP stream.
+        userspace_stream: Box<dyn Stream>,
+        www_address: SocketAddr,
+        www_stream: Box<dyn Stream>,
+    );
 }
 
-/// A TCP filter allows you to observe the TCP traffic going into and out of the
-/// virtual tunnel interface.
-///
-/// Both `on_source_read` and `on_destination_read` are called before data is
-/// sent between peers asynchronously. This means that these methods should
-/// not take a lot of time to complete as they will block the event loop.
-///
-/// Here is a simple example that prints the amount of data going in and out
-/// of the tunnel interface:
-///
-/// ```rust
-/// use htapod::TCPFilter;
-///
-/// struct ByteCountTCPFilter {}
-///
-/// impl TCPFilter for ByteCountTCPFilter {
-///
-///     fn on_source_read(&mut self, data: &[u8]) {
-///         log::info!("Read {} bytes from net namespace.", data.len());
-///     }
-///
-///     fn on_destination_read(&mut self, _data: &[u8]) {
-///         log::info!("Received {} bytes from the outside world.", data.len());
-///     }
-/// }
-/// ```
-pub trait TCPFilter: Send // TODO move the send bound in the netstack
-{
-    /// Called when data is sent into the tunnel interface from within the network namespace.
-    ///
-    /// This typically is data that the wrapped binary is sending to the outside world.
-    fn on_source_read(&mut self, data: &[u8]);
-
-    /// Called when data is sent to the tunnel interface from the outside world.
-    ///
-    /// This typically is data that the outside world is sending into the wrapped binary
-    /// running inside the network namespace.
-    fn on_destination_read(&mut self, data: &[u8]);
-}
+impl Stream for netstack_smoltcp::TcpStream {}
+impl Stream for tokio::net::TcpStream {}
+impl Stream for tokio_rustls::client::TlsStream<tokio::net::TcpStream> {}
+impl Stream for tokio_rustls::server::TlsStream<netstack_smoltcp::TcpStream> {}
 
 /// A representation of a UDP packet.
 pub struct UDPPacket {
@@ -189,7 +172,15 @@ impl<TH: TCPFilter, TR: TCPRouter> TCPStack<TH, TR> {
     ) {
         match tokio::net::TcpStream::connect(remote_address).await {
             Ok(remote_stream) => {
-                setup_stream_copy(tcp_stream, remote_stream, tcp_filter).await;
+                tcp_filter.lock().and_then(|mut filter| {
+                    filter.handle_new_connection(
+                        local_address,
+                        Box::new(tcp_stream),
+                        remote_address,
+                        Box::new(remote_stream),
+                    );
+                    Ok(())
+                });
             }
             Err(e) => {
                 log::error!(
@@ -225,7 +216,7 @@ impl<TH: TCPFilter, TR: TCPRouter> TCPStack<TH, TR> {
     #[doc(hidden)]
     async fn new_tls_connection(
         tcp_stream: netstack_smoltcp::TcpStream,
-        _local_address: SocketAddr,
+        local_address: SocketAddr,
         remote_address: SocketAddr,
         tcp_filter: std::sync::Arc<std::sync::Mutex<TH>>,
         root_ca: Arc<rcgen::CertifiedKey>,
@@ -279,15 +270,23 @@ impl<TH: TCPFilter, TR: TCPRouter> TCPStack<TH, TR> {
                     .await
                     .unwrap(); //TODO
 
-                let remote_address = match server_name {
+                let server_name = match server_name {
                     SanType::DnsName(name) => name.as_str().to_owned(),
                     SanType::IpAddress(address) => address.to_string(),
                     _ => panic!("Unsupported TLS peer SAN type."), // TODO
                 };
-                let remote_address = ServerName::try_from(remote_address).unwrap();
-                let remote_stream = connector.connect(remote_address, stream).await.unwrap(); // TODO
+                let server_name = ServerName::try_from(server_name).unwrap();
+                let remote_stream = connector.connect(server_name, stream).await.unwrap(); // TODO
 
-                setup_stream_copy(tls_stream, remote_stream, tcp_filter).await;
+                tcp_filter.lock().and_then(|mut filter| {
+                    filter.handle_new_connection(
+                        local_address,
+                        Box::new(tls_stream),
+                        remote_address,
+                        Box::new(remote_stream),
+                    );
+                    Ok(())
+                });
             }
             Err(_) => {
                 todo!("handle");
@@ -325,9 +324,10 @@ impl<TH: TCPFilter, TR: TCPRouter> TCPStack<TH, TR> {
                 // TODO: Should spawn a task for every new connection.
                 Some((tcp_stream, local_address, remote_address)) = tcp_listener.next() => {
                     log::debug!("Got new TCP connection to {:?}", remote_address);
+                    let handler = self.handler.clone();
+                    handler.lock().unwrap().prepare().unwrap();
                     match self.router.resolve(&remote_address) {
                         Some(crate::router::TCPTargetAddress::Plain(address)) => {
-                            let handler = self.handler.clone();
                             tokio::spawn(async move {
                                 Self::new_unsecured_tcp_connection(
                                     tcp_stream, local_address, address, handler
@@ -335,7 +335,6 @@ impl<TH: TCPFilter, TR: TCPRouter> TCPStack<TH, TR> {
                             });
                         },
                         Some(crate::router::TCPTargetAddress::TLS(address)) => {
-                            let handler = self.handler.clone();
                             let root_ca = root_ca.clone();
                             tokio::spawn(async move {
                             Self::new_tls_connection(

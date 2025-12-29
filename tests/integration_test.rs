@@ -1,8 +1,8 @@
 use htapod::router::{ByPortDefaultRouting, MatchAddress};
 use htapod::Namespace;
-use htapod::{ByPortTCPRouter, PassthroughTCP};
-use hyper::server::conn::Http;
+use htapod::{ByPortTCPRouter, HTTPFilter, PassthroughTCP};
 use hyper::service::service_fn;
+use hyper_util::rt::TokioIo;
 use rcgen::generate_simple_self_signed;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::PrivateKeyDer;
@@ -87,12 +87,15 @@ pub async fn start_server() -> Result<u16, Box<dyn std::error::Error + Send + Sy
                 let service = service_fn(|_| async {
                     let response = hyper::Response::builder()
                         .version(hyper::Version::HTTP_11)
-                        .body(hyper::Body::from("Hello, World!"))
+                        .body("Hello, World!".to_string())
                         .unwrap();
                     Ok::<_, hyper::Error>(response)
                 });
 
-                if let Err(err) = Http::new().serve_connection(stream, service).await {
+                if let Err(err) = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await
+                {
                     println!("Error serving connection: {:?}", err);
                 }
             });
@@ -103,7 +106,7 @@ pub async fn start_server() -> Result<u16, Box<dyn std::error::Error + Send + Sy
 }
 
 #[test]
-fn test_server() {
+fn test_http_filter() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let port = rt.block_on(async { start_server().await.unwrap() });
 
@@ -111,7 +114,7 @@ fn test_server() {
     let htap = htapod::runner::builder()
         .with_namespace(Namespace::unshare_all())
         .with_tcp_stack(
-            PassthroughTCP::new(),
+            HTTPFilter::new(),
             MatchAddress::new(
                 localhost.parse().unwrap(),
                 "127.0.0.1".parse().unwrap(),

@@ -1,5 +1,5 @@
 use clap::Parser;
-use htapod::{ByPortTCPRouter, HttpFilter, Namespace, PassthroughUDP};
+use htapod::{ByPortTCPRouter, HTTPFilter, Namespace, PassthroughUDP};
 
 #[derive(Parser)]
 #[command(name = "htapod")]
@@ -23,7 +23,7 @@ fn main() -> Result<(), ()> {
     let tap = htapod::runner::builder()
         .with_namespace(Namespace::unshare_all())
         .with_tcp_stack(
-            HttpFilter::new(std::io::stdout()),
+            HTTPFilter::new(),
             ByPortTCPRouter::builder()
                 .forward_unsecured(80)
                 .forward_with_tls(443)
