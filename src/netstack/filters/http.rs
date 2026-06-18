@@ -79,6 +79,12 @@ impl Drop for HTTPFilter {
     }
 }
 
+impl Default for HTTPFilter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HTTPFilter {
     pub fn new() -> HTTPFilter {
         HTTPFilter {
@@ -145,9 +151,9 @@ impl TCPFilter for HTTPFilter {
         upstream_stream: Box<dyn Stream>,
     ) {
         let upstream_token = self.next_upstream_token.fetch_add(1, Ordering::Relaxed);
-        self.upstream_state.lock().and_then(|mut state| {
+        self.upstream_state.lock().map(|mut state| {
             state.upstreams.insert(upstream_token, upstream_stream);
-            Ok(())
+            ()
         });
 
         let uds_path = self.uds_path.clone();

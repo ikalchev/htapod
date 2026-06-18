@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::{netstack::filters::tcp, router::TCPRouter};
+use crate::router::TCPRouter;
 use futures::{SinkExt, StreamExt};
 use rcgen::SanType;
 use rustls::pki_types::ServerName;
@@ -172,14 +172,14 @@ impl<TH: TCPFilter, TR: TCPRouter> TCPStack<TH, TR> {
     ) {
         match tokio::net::TcpStream::connect(remote_address).await {
             Ok(remote_stream) => {
-                tcp_filter.lock().and_then(|mut filter| {
+                tcp_filter.lock().map(|mut filter| {
                     filter.handle_new_connection(
                         local_address,
                         Box::new(tcp_stream),
                         remote_address,
                         Box::new(remote_stream),
                     );
-                    Ok(())
+                    ()
                 });
             }
             Err(e) => {
@@ -278,14 +278,14 @@ impl<TH: TCPFilter, TR: TCPRouter> TCPStack<TH, TR> {
                 let server_name = ServerName::try_from(server_name).unwrap();
                 let remote_stream = connector.connect(server_name, stream).await.unwrap(); // TODO
 
-                tcp_filter.lock().and_then(|mut filter| {
+                tcp_filter.lock().map(|mut filter| {
                     filter.handle_new_connection(
                         local_address,
                         Box::new(tls_stream),
                         remote_address,
                         Box::new(remote_stream),
                     );
-                    Ok(())
+                    ()
                 });
             }
             Err(_) => {
