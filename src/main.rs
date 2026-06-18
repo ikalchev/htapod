@@ -1,5 +1,9 @@
 use clap::Parser;
 use htapod::{ByPortTCPRouter, HTTPFilter, Namespace, PassthroughUDP};
+use hyper::{
+    body::{Body, Incoming},
+    Request, Response,
+};
 
 #[derive(Parser)]
 #[command(name = "htapod")]
@@ -15,6 +19,13 @@ struct Cli {
     command: Vec<String>,
 }
 
+fn inspect_request(req: &Request<Incoming>) -> () {
+    println!("---> {} {}", req.method(), req.uri());
+}
+fn inspect_response(res: &Response<Incoming>) -> () {
+    println!("<--- {} {}", res.status(), res.size_hint().lower());
+}
+
 fn main() -> Result<(), ()> {
     env_logger::init();
     let cli = Cli::parse();
@@ -23,7 +34,7 @@ fn main() -> Result<(), ()> {
     let tap = htapod::runner::builder()
         .with_namespace(Namespace::unshare_all())
         .with_tcp_stack(
-            HTTPFilter::new(),
+            HTTPFilter::new_with_inspect(inspect_request, inspect_response),
             ByPortTCPRouter::builder()
                 .forward_unsecured(80)
                 .forward_with_tls(443)

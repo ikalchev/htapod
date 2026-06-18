@@ -12,12 +12,29 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
-struct ProxyService {
-    sender: Arc<Mutex<SendRequest<Incoming>>>,
+struct ProxyService<FReq, FRes>
+where
+    FReq: Fn(&Request<Incoming>),
+    FRes: Fn(&Response<Incoming>) + Clone + Send + 'static,
+{
+    // Technically, the sender is accessed exclusively through hyper, but the
+    // `call` method takes a shared ref, hence the ref cell.
+    // TODO: move within the handshake to within the clal method.
+    sender: std::cell::RefCell<SendRequest<Incoming>>,
+    request_inspect_fn: FReq,
+    response_inspect_fn: FRes,
 }
 
-impl ProxyService {
-    async fn new(stream: Box<dyn Stream>) -> Self {
+impl<
+        FReq: Fn(&Request<Incoming>),
+        FRes: Fn(&Response<Incoming>) + Clone + Send + 'static,
+    > ProxyService<FReq, FRes>
+{
+    async fn new(
+        stream: Box<dyn Stream>,
+        request_inspect_fn: FReq,
+        response_inspect_fn: FRes,
+    ) -> Result<Self, hyper::Error> {
         let io = TokioIo::new(stream);
         let (sender, connection) = hyper::client::conn::http1::handshake(io).await.unwrap();
 
@@ -28,23 +45,34 @@ impl ProxyService {
             }
         });
 
-        Self {
-            sender: Arc::new(Mutex::new(sender)),
-        }
+        Ok(Self {
+            sender: std::cell::RefCell::new(sender),
+            request_inspect_fn,
+            response_inspect_fn,
+        })
     }
 }
 
-impl hyper::service::Service<Request<Incoming>> for ProxyService {
+impl<FReq, FRes> hyper::service::Service<Request<Incoming>> for ProxyService<FReq, FRes>
+where
+    FReq: Fn(&Request<Incoming>),
+    FRes: Fn(&Response<Incoming>) + Clone + Send + 'static,
+{
     type Response = Response<Incoming>;
     type Error = hyper::Error;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
     fn call(&self, request: Request<Incoming>) -> Self::Future {
-        let response = {
-            let mut sender = self.sender.lock().unwrap();
-            sender.send_request(request)
-        };
-        Box::pin(response)
+        (self.request_inspect_fn)(&request);
+        let response = self.sender.borrow_mut().send_request(request);
+
+        // Wrap the response in a future which inspects whatever is inside.
+        let response_inspect_fn = self.response_inspect_fn.clone();
+        Box::pin(async move {
+            let response = response.await?;
+            (response_inspect_fn)(&response);
+            Ok(response)
+        })
     }
 }
 
@@ -60,14 +88,19 @@ impl UpstreamState {
     }
 }
 
-pub struct HTTPFilter {
+fn noop_request(_: &Request<Incoming>) {}
+fn noop_response(_: &Response<Incoming>) {}
+
+pub struct HTTPFilter<FReq, FRes> {
     uds_path: String,
     upstream_state: Arc<Mutex<UpstreamState>>,
     next_upstream_token: AtomicU32,
     server_handle: Option<tokio::task::JoinHandle<()>>,
+    request_inspect_fn: FReq,
+    response_inspect_fn: FRes,
 }
 
-impl Drop for HTTPFilter {
+impl<FReq, FRes> Drop for HTTPFilter<FReq, FRes> {
     fn drop(&mut self) {
         // Clean up the Unix domain socket file when the filter is dropped
         if Path::new(&self.uds_path).exists() {
@@ -79,24 +112,48 @@ impl Drop for HTTPFilter {
     }
 }
 
-impl Default for HTTPFilter {
+impl Default for HTTPFilter<fn(&Request<Incoming>) -> (), fn(&Response<Incoming>) -> ()> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl HTTPFilter {
-    pub fn new() -> HTTPFilter {
+impl HTTPFilter<fn(&Request<Incoming>) -> (), fn(&Response<Incoming>) -> ()> {
+    pub fn new() -> Self {
         HTTPFilter {
             uds_path: "htapod.sock".to_owned(),
             server_handle: None,
             upstream_state: Arc::new(Mutex::new(UpstreamState::new())),
             next_upstream_token: AtomicU32::new(0),
+            request_inspect_fn: noop_request,
+            response_inspect_fn: noop_response,
         }
     }
 }
 
-impl TCPFilter for HTTPFilter {
+// Generic impl for custom inspect functions
+impl<FReq, FRes> HTTPFilter<FReq, FRes>
+where
+    FReq: Fn(&Request<Incoming>) + Clone + Send + 'static,
+    FRes: Fn(&Response<Incoming>) + Clone + Send + 'static,
+{
+    pub fn new_with_inspect(request_inspect_fn: FReq, response_inspect_fn: FRes) -> Self {
+        HTTPFilter {
+            uds_path: "htapod.sock".to_owned(),
+            server_handle: None,
+            upstream_state: Arc::new(Mutex::new(UpstreamState::new())),
+            next_upstream_token: AtomicU32::new(0),
+            request_inspect_fn,
+            response_inspect_fn,
+        }
+    }
+}
+
+impl<FReq, FRes> TCPFilter for HTTPFilter<FReq, FRes>
+where
+    FReq: Fn(&Request<Incoming>) + Clone + Send + 'static,
+    FRes: Fn(&Response<Incoming>) + Clone + Send + 'static,
+{
     fn prepare(&mut self) -> std::io::Result<()> {
         if Path::new(&self.uds_path).exists() {
             std::fs::remove_file(&self.uds_path)?;
@@ -105,6 +162,11 @@ impl TCPFilter for HTTPFilter {
         let uds_path = self.uds_path.clone();
 
         let upstream_state = self.upstream_state.clone();
+        let request_inspect_fn = self.request_inspect_fn.clone();
+        let response_inspect_fn = self.response_inspect_fn.clone();
+
+        // Spawn a task to listen on the UDS and handle connections by forwarding them
+        // through the ProxyService.
         let handle = tokio::spawn(async move {
             let listener = UnixListener::bind(&uds_path).expect("Failed to bind Unix socket");
 
@@ -118,7 +180,13 @@ impl TCPFilter for HTTPFilter {
                             let mut upstream_state = upstream_state.lock().unwrap();
                             upstream_state.upstreams.remove(&upstream_token).unwrap()
                         };
-                        let proxy_service = ProxyService::new(upstream).await;
+                        let proxy_service = ProxyService::new(
+                            upstream,
+                            request_inspect_fn.clone(),
+                            response_inspect_fn.clone(),
+                        )
+                        .await
+                        .unwrap();
 
                         let io = TokioIo::new(socket);
                         tokio::task::spawn(async move {
@@ -153,7 +221,7 @@ impl TCPFilter for HTTPFilter {
         let upstream_token = self.next_upstream_token.fetch_add(1, Ordering::Relaxed);
         self.upstream_state.lock().map(|mut state| {
             state.upstreams.insert(upstream_token, upstream_stream);
-            ()
+            
         });
 
         let uds_path = self.uds_path.clone();

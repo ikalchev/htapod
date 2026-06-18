@@ -88,7 +88,6 @@ pub struct UDPPacket {
 /// A UDP filter allows you to act on the UDP traffic going into and out of the
 /// virtual tunnel interface.
 ///
-///
 /// Both `handle_tun_udp` and `handle_remote_udp` are called before data is
 /// sent to the peer asynchronously. This means that these methods should
 /// not take a lot of time to complete as they will block the event loop.
@@ -179,7 +178,7 @@ impl<TH: TCPFilter, TR: TCPRouter> TCPStack<TH, TR> {
                         remote_address,
                         Box::new(remote_stream),
                     );
-                    ()
+                    
                 });
             }
             Err(e) => {
@@ -285,7 +284,7 @@ impl<TH: TCPFilter, TR: TCPRouter> TCPStack<TH, TR> {
                         remote_address,
                         Box::new(remote_stream),
                     );
-                    ()
+                    
                 });
             }
             Err(_) => {
