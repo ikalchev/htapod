@@ -1,5 +1,6 @@
 use crate::{netstack::netstack::Stream, TCPFilter};
-use hyper::body::Incoming;
+use http_body_util::{BodyExt, Full};
+use hyper::body::{Bytes, Incoming};
 use hyper::client::conn::http1::SendRequest;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
@@ -14,20 +15,17 @@ use tokio::net::{UnixListener, UnixStream};
 
 struct ProxyService<FReq, FRes>
 where
-    FReq: Fn(&Request<Incoming>),
-    FRes: Fn(&Response<Incoming>) + Clone + Send + 'static,
+    FReq: Fn(&http::request::Parts, &Bytes),
+    FRes: Fn(&http::response::Parts, &Bytes) + Clone + Send + 'static,
 {
-    // Technically, the sender is accessed exclusively through hyper, but the
-    // `call` method takes a shared ref, hence the ref cell.
-    // TODO: move within the handshake to within the clal method.
-    sender: std::cell::RefCell<SendRequest<Incoming>>,
+    sender: Arc<Mutex<SendRequest<Full<Bytes>>>>,
     request_inspect_fn: FReq,
     response_inspect_fn: FRes,
 }
 
 impl<
-        FReq: Fn(&Request<Incoming>),
-        FRes: Fn(&Response<Incoming>) + Clone + Send + 'static,
+        FReq: Fn(&http::request::Parts, &Bytes),
+        FRes: Fn(&http::response::Parts, &Bytes) + Clone + Send + 'static,
     > ProxyService<FReq, FRes>
 {
     async fn new(
@@ -36,7 +34,9 @@ impl<
         response_inspect_fn: FRes,
     ) -> Result<Self, hyper::Error> {
         let io = TokioIo::new(stream);
-        let (sender, connection) = hyper::client::conn::http1::handshake(io).await.unwrap();
+        let (sender, connection) = hyper::client::conn::http1::Builder::new()
+            .handshake(io)
+            .await?;
 
         tokio::task::spawn(async move {
             if let Err(err) = connection.await {
@@ -46,7 +46,7 @@ impl<
         });
 
         Ok(Self {
-            sender: std::cell::RefCell::new(sender),
+            sender: Arc::new(Mutex::new(sender)),
             request_inspect_fn,
             response_inspect_fn,
         })
@@ -55,23 +55,36 @@ impl<
 
 impl<FReq, FRes> hyper::service::Service<Request<Incoming>> for ProxyService<FReq, FRes>
 where
-    FReq: Fn(&Request<Incoming>),
-    FRes: Fn(&Response<Incoming>) + Clone + Send + 'static,
+    FReq: Fn(&http::request::Parts, &Bytes) + Clone + Send + 'static,
+    FRes: Fn(&http::response::Parts, &Bytes) + Clone + Send + 'static,
 {
-    type Response = Response<Incoming>;
+    type Response = Response<Full<Bytes>>;
     type Error = hyper::Error;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
     fn call(&self, request: Request<Incoming>) -> Self::Future {
-        (self.request_inspect_fn)(&request);
-        let response = self.sender.borrow_mut().send_request(request);
+        let sender = self.sender.clone();
+        let req_fn = self.request_inspect_fn.clone();
+        let res_fn = self.response_inspect_fn.clone();
 
-        // Wrap the response in a future which inspects whatever is inside.
-        let response_inspect_fn = self.response_inspect_fn.clone();
         Box::pin(async move {
-            let response = response.await?;
-            (response_inspect_fn)(&response);
-            Ok(response)
+            let (parts, body) = request.into_parts();
+            let bytes = body.collect().await?.to_bytes();
+            (req_fn)(&parts, &bytes);
+
+            let req = Request::from_parts(parts, Full::from(bytes));
+            let response_fut = {
+                let mut sender_guard = sender.lock().unwrap();
+                sender_guard.send_request(req)
+            };
+
+            let response = response_fut.await?;
+            let (parts, body) = response.into_parts();
+            let bytes = body.collect().await?.to_bytes();
+            (res_fn)(&parts, &bytes);
+
+            let res = Response::from_parts(parts, Full::from(bytes));
+            Ok(res)
         })
     }
 }
@@ -87,9 +100,6 @@ impl UpstreamState {
         }
     }
 }
-
-fn noop_request(_: &Request<Incoming>) {}
-fn noop_response(_: &Response<Incoming>) {}
 
 pub struct HTTPFilter<FReq, FRes> {
     uds_path: String,
@@ -112,30 +122,11 @@ impl<FReq, FRes> Drop for HTTPFilter<FReq, FRes> {
     }
 }
 
-impl Default for HTTPFilter<fn(&Request<Incoming>) -> (), fn(&Response<Incoming>) -> ()> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl HTTPFilter<fn(&Request<Incoming>) -> (), fn(&Response<Incoming>) -> ()> {
-    pub fn new() -> Self {
-        HTTPFilter {
-            uds_path: "htapod.sock".to_owned(),
-            server_handle: None,
-            upstream_state: Arc::new(Mutex::new(UpstreamState::new())),
-            next_upstream_token: AtomicU32::new(0),
-            request_inspect_fn: noop_request,
-            response_inspect_fn: noop_response,
-        }
-    }
-}
-
 // Generic impl for custom inspect functions
 impl<FReq, FRes> HTTPFilter<FReq, FRes>
 where
-    FReq: Fn(&Request<Incoming>) + Clone + Send + 'static,
-    FRes: Fn(&Response<Incoming>) + Clone + Send + 'static,
+    FReq: Fn(&http::request::Parts, &Bytes) + Clone + Send + 'static,
+    FRes: Fn(&http::response::Parts, &Bytes) + Clone + Send + 'static,
 {
     pub fn new_with_inspect(request_inspect_fn: FReq, response_inspect_fn: FRes) -> Self {
         HTTPFilter {
@@ -151,8 +142,8 @@ where
 
 impl<FReq, FRes> TCPFilter for HTTPFilter<FReq, FRes>
 where
-    FReq: Fn(&Request<Incoming>) + Clone + Send + 'static,
-    FRes: Fn(&Response<Incoming>) + Clone + Send + 'static,
+    FReq: Fn(&http::request::Parts, &Bytes) + Clone + Send + 'static,
+    FRes: Fn(&http::response::Parts, &Bytes) + Clone + Send + 'static,
 {
     fn prepare(&mut self) -> std::io::Result<()> {
         if Path::new(&self.uds_path).exists() {
@@ -221,7 +212,6 @@ where
         let upstream_token = self.next_upstream_token.fetch_add(1, Ordering::Relaxed);
         self.upstream_state.lock().map(|mut state| {
             state.upstreams.insert(upstream_token, upstream_stream);
-            
         });
 
         let uds_path = self.uds_path.clone();

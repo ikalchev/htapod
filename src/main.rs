@@ -1,5 +1,6 @@
 use clap::Parser;
 use htapod::{ByPortTCPRouter, HTTPFilter, Namespace, PassthroughUDP};
+use httparse::Error::HeaderValue;
 use hyper::{
     body::{Body, Incoming},
     Request, Response,
@@ -19,11 +20,20 @@ struct Cli {
     command: Vec<String>,
 }
 
-fn inspect_request(req: &Request<Incoming>) -> () {
-    println!("---> {} {}", req.method(), req.uri());
+fn inspect_request(parts: &http::request::Parts, body: &hyper::body::Bytes) {
+    println!(
+        "---> {:?} {} {} {} bytes",
+        parts
+            .headers
+            .get("host")
+            .unwrap_or(&http::HeaderValue::from_static("unknown")),
+        parts.method,
+        parts.uri,
+        body.len()
+    );
 }
-fn inspect_response(res: &Response<Incoming>) -> () {
-    println!("<--- {} {}", res.status(), res.size_hint().lower());
+fn inspect_response(parts: &http::response::Parts, body: &hyper::body::Bytes) {
+    println!("<--- {} {} bytes", parts.status, body.len());
 }
 
 fn main() -> Result<(), ()> {
