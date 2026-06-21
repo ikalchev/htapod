@@ -114,7 +114,8 @@ fn test_http_filter() {
     let htap = htapod::runner::builder()
         .with_namespace(Namespace::unshare_all())
         .with_tcp_stack(
-            HTTPFilter::new(),
+            // TODO: We need a default noop inspectors maybe.
+            HTTPFilter::new_with_inspect(|p, b| {}, |p, b| {}),
             MatchAddress::new(
                 localhost.parse().unwrap(),
                 "127.0.0.1".parse().unwrap(),

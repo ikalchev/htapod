@@ -140,6 +140,37 @@ where
     }
 }
 
+// TODO: handle the traffic not being http.
+/// A TCPFilter that allows the inspection of HTTP request and responses.
+///
+/// For every connection that arrives from the network namespace, there is a
+/// corresponding connection from the root network namespace to the peer. To
+/// leverage hyper HTTP handling, the traffic between these connections is
+/// proxied through a hyper Service.
+///
+/// This proxying happens over a UDS, i.e. all traffic coming from the userspace
+/// is sent over the UDS, handled by the hyper Service and then forwarded to the
+/// peer (and vice versa). However, we need to forward the stream from
+/// the connection handling in the TCPFilter to the proxy task so we can setup
+/// the `Service` to the right peer.
+///
+/// The above is done as follows:
+/// - We maintain a mapping from a u32 token to a `Stream`.
+/// - Whenever a new connection is established, we put the corresponding
+///     upstream in the map and key it with a new u32 token. We then establish a
+///     connection to the UDS and send the token. Finally, we set up traffic forwarding
+///     between the userspace connection and the UDS connection.
+/// - On the other end, whenever we get a new connection on the UDS, we read a u32
+///     token from it, get the userspace `Stream` from the map and then spawn
+///     a task to handle the hyper Service.
+///
+/// Conceptually, the flow looks like this:
+///
+/// ```
+/// userspace --> UDS --> hyper::Service --> inspect request --> upstream --┐
+///                                                                    Some Server
+/// userspace <-- UDS <-- inspect response <-- hyper::Service <-- upstream -┘
+/// ```
 impl<FReq, FRes> TCPFilter for HTTPFilter<FReq, FRes>
 where
     FReq: Fn(&http::request::Parts, &Bytes) + Clone + Send + 'static,
@@ -228,4 +259,89 @@ where
             }
         });
     }
+}
+
+// Tests
+
+#[cfg(test)]
+mod tests {
+    use super::ProxyService;
+    use crate::netstack::netstack::Stream;
+    use futures::task::{Context, Poll};
+    use hyper::service::Service;
+    use std::pin::Pin;
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+    use tokio::test;
+
+    // A mock upstream stream that can fail on demand
+    struct FailingStream;
+
+    impl AsyncRead for FailingStream {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "Connection reset by peer",
+            )))
+        }
+    }
+
+    impl AsyncWrite for FailingStream {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "Connection reset by peer",
+            )))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl Stream for FailingStream {}
+
+    // A mock stream that immediately closes
+    struct ClosedStream;
+
+    impl AsyncRead for ClosedStream {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(())) // EOF
+        }
+    }
+
+    impl AsyncWrite for ClosedStream {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl Stream for ClosedStream {}
 }
